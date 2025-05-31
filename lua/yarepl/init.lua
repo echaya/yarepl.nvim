@@ -579,6 +579,7 @@ M._send_operator_internal = function(motion)
     if motion == nil then
         vim.go.operatorfunc = [[v:lua.require'yarepl'._send_operator_internal]]
         api.nvim_feedkeys('g@', 'ni', false)
+        return
     end
 
     local id = vim.b[0].repl_id
@@ -600,6 +601,7 @@ M._source_operator_internal = function(motion)
     if motion == nil then
         vim.go.operatorfunc = [[v:lua.require'yarepl'._source_operator_internal]]
         api.nvim_feedkeys('g@', 'ni', false)
+        return
     end
 
     local id = vim.b[0].repl_id
