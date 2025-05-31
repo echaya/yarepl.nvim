@@ -36,7 +36,6 @@ local default_config = function()
             --     virtual_text_when_source_content = { -- Per-REPL override for virtual text settings
             --         enabled = true,
             --         hl_group = 'MoreMsg',
-            --         -- delay_ms can also be overridden if desired, though typically global
             --     }
             -- },
         },
@@ -52,7 +51,6 @@ local default_config = function()
         virtual_text_when_source_content = {
             enabled_default = false, -- Global default for enabling virtual text on source
             hl_group_default = 'Comment', -- Default highlight group for YAREPL virtual text
-            delay_ms = 200, -- Delay in milliseconds to wait for REPL to echo command
         },
     }
 end
@@ -155,8 +153,12 @@ local function create_repl(id, repl_name)
         api.nvim_set_current_buf(bufnr)
     end
 
+    local current_repl_obj_ref = {}
     local opts = {}
-    opts.on_exit = function()
+    opts.on_exit = function(_, _, _)
+        if api.nvim_buf_is_loaded(bufnr) then
+            pcall(api.nvim_buf_detach, bufnr)
+        end
         if M._config.close_on_exit then
             local bufwinid = fn.bufwinid(bufnr)
             while bufwinid ~= -1 do
@@ -183,17 +185,63 @@ local function create_repl(id, repl_name)
     end
 
     local term = termopen(cmd, opts)
+
+    local attach_success = pcall(api.nvim_buf_attach, bufnr, false, {
+        on_lines = function(_, attached_bufnr, _, _, _, new_lastline, _)
+            local current_repl = current_repl_obj_ref.value
+            if not current_repl or not current_repl.pending_virt_text_info or not repl_is_valid(current_repl) then
+                return
+            end
+            if attached_bufnr ~= current_repl.bufnr then
+                return
+            end
+
+            local pending_info = current_repl.pending_virt_text_info
+
+            local scan_start_line = math.max(0, new_lastline - 20)
+            local lines_in_repl_chunk = api.nvim_buf_get_lines(attached_bufnr, scan_start_line, new_lastline + 1, false)
+            local found_cmd_line_0idx_absolute = -1
+
+            for i = #lines_in_repl_chunk, 1, -1 do
+                if lines_in_repl_chunk[i]:find(pending_info.command_to_match, 1, true) then
+                    found_cmd_line_0idx_absolute = scan_start_line + (i - 1)
+                    break
+                end
+            end
+
+            if found_cmd_line_0idx_absolute ~= -1 then
+                current_repl.pending_virt_text_info = nil
+
+                local virt_lines_opts = {
+                    virt_lines = { { { pending_info.comment_text, pending_info.hl_group } } },
+                    virt_lines_above = false,
+                }
+                api.nvim_buf_set_extmark(
+                    attached_bufnr,
+                    M._virt_text_ns_id,
+                    found_cmd_line_0idx_absolute,
+                    0,
+                    virt_lines_opts
+                )
+            end
+        end,
+    })
+    if not attach_success then
+        vim.notify("YAREPL: Failed to attach 'on_lines' listener to REPL buffer " .. bufnr, vim.log.levels.ERROR)
+    end
+
     if M._config.format_repl_buffers_names then
         api.nvim_buf_set_name(bufnr, string.format('#%s#%d', repl_name, id))
     end
-    M._repls[id] = { bufnr = bufnr, term = term, name = repl_name }
+    M._repls[id] = { bufnr = bufnr, term = term, name = repl_name, pending_virt_text_info = nil }
+    current_repl_obj_ref.value = M._repls[id]
 end
 
 -- get the id of the closest repl whose name is `NAME` from the `ID`
 local function find_closest_repl_from_id_with_name(id, name)
     local closest_id = nil
     local closest_distance = math.huge
-    for repl_id, repl in pairs(M._repls) do
+    for repl_id, repl in ipairs(M._repls) do
         if repl.name == name then
             local distance = math.abs(repl_id - id)
             if distance < closest_distance then
@@ -258,8 +306,22 @@ function M._get_repl(id, name, bufnr)
     end
 
     if name ~= nil and name ~= '' then
-        id = find_closest_repl_from_id_with_name(id, name)
-        repl = M._repls[id]
+        local base_id_for_search = id
+        if M._bufnrs_to_repls[bufnr] == repl then
+            for idx, r_obj in ipairs(M._repls) do
+                if r_obj == repl then
+                    base_id_for_search = idx
+                    break
+                end
+            end
+        end
+
+        local found_idx_by_name = find_closest_repl_from_id_with_name(base_id_for_search, name)
+        if found_idx_by_name then
+            repl = M._repls[found_idx_by_name]
+        else
+            repl = nil
+        end
     end
 
     if not repl_is_valid(repl) then
@@ -428,78 +490,6 @@ M.formatter.bracketed_pasting_no_final_new_line = M.formatter.factory {
     },
 }
 
---- Displays the source comment as virtual text in the REPL buffer.
----@param repl table The REPL object.
----@param original_strings string[] The original strings/code block sent by the user.
----@param command_to_match string The first line of the command sent to REPL, used for anchoring.
-local function _display_source_comment_virtual_text(repl, original_strings, command_to_match)
-    if not repl_is_valid(repl) or not M._virt_text_ns_id then
-        return
-    end
-    if not command_to_match or command_to_match == '' then
-        return
-    end
-
-    local repl_meta = M._config.metas[repl.name]
-    local vt_config = repl_meta.virtual_text_when_source_content
-
-    local code_part_for_display = 'YAREPL'
-    if original_strings and #original_strings > 0 then
-        for _, line_str in ipairs(original_strings) do
-            local trimmed_line = vim.fn.trim(line_str)
-            if #trimmed_line > 0 then
-                code_part_for_display = trimmed_line
-                break
-            end
-        end
-    end
-
-    local comment_text = string.format('%s - %s', os.date '%H:%M:%S', code_part_for_display)
-
-    if not comment_text or comment_text == '' then
-        return
-    end
-
-    local delay_ms_to_use = vt_config.delay_ms
-
-    vim.defer_fn(function()
-        if not repl_is_valid(repl) then
-            return
-        end
-
-        local repl_bufnr_target = repl.bufnr
-        local lines_in_repl = api.nvim_buf_get_lines(repl_bufnr_target, 0, -1, false)
-        local found_cmd_line_0idx = -1
-
-        for i = #lines_in_repl, 1, -1 do
-            if lines_in_repl[i]:find(command_to_match, 1, true) then
-                found_cmd_line_0idx = i - 1
-                break
-            end
-        end
-
-        if found_cmd_line_0idx ~= -1 then
-            local hl_group = vt_config.hl_group
-            local virt_lines_opts = {
-                virt_lines = { { { comment_text, hl_group } } },
-                virt_lines_above = false,
-            }
-            api.nvim_buf_set_extmark(repl_bufnr_target, M._virt_text_ns_id, found_cmd_line_0idx, 0, virt_lines_opts)
-        end
-    end, delay_ms_to_use)
-end
-
----@param id number the id of the repl,
----@param name string? the name of the closest repl that will try to find
----@param bufnr number? the buffer number from which to find the attached REPL.
----@param strings string[] a list of strings
----@param use_formatter boolean? whether use formatter (e.g. bracketed_pasting)? Default: true
----@param source_content boolean? Whether use source_syntax (defined by REPL meta) Default: false
--- Send a list of strings to the repl specified by `id` and `name` and `bufnr`.
--- If `id` is 0, then will try to find the REPL that `bufnr` is attached to, if
--- not find, will use `id = 1`. If `name` is not nil or not an empty string,
--- then will try to find the REPL with `name` relative to `id`. If `bufnr` is
--- nil or `bufnr` = 0, will find the REPL that current buffer is attached to.
 M._send_strings = function(id, name, bufnr, strings, use_formatter, source_content)
     use_formatter = use_formatter == nil and true or use_formatter
     if bufnr == nil or bufnr == 0 then
@@ -538,12 +528,27 @@ M._send_strings = function(id, name, bufnr, strings, use_formatter, source_conte
         if source_command_sent_to_repl and source_command_sent_to_repl ~= '' then
             if meta.virtual_text_when_source_content and meta.virtual_text_when_source_content.enabled then
                 local command_to_match_in_repl = vim.split(source_command_sent_to_repl, '\n')[1]
-                _display_source_comment_virtual_text(repl, strings, command_to_match_in_repl)
+
+                local code_part_for_display = 'YAREPL'
+                if strings and #strings > 0 then
+                    for _, line_str in ipairs(strings) do
+                        local trimmed_line = vim.fn.trim(line_str)
+                        if #trimmed_line > 0 then
+                            code_part_for_display = trimmed_line
+                            break
+                        end
+                    end
+                end
+                local comment_text_for_virt = string.format('%s - %s', os.date '%H:%M:%S', code_part_for_display)
+
+                repl.pending_virt_text_info = {
+                    command_to_match = command_to_match_in_repl,
+                    comment_text = comment_text_for_virt,
+                    hl_group = meta.virtual_text_when_source_content.hl_group,
+                }
             end
             strings = vim.split(source_command_sent_to_repl, '\n')
         end
-    else
-        strings = strings
     end
 
     if use_formatter then
