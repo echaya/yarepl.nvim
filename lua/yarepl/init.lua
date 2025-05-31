@@ -19,30 +19,15 @@ local default_config = function()
             ipython = { cmd = 'ipython', formatter = 'bracketed_pasting', source_syntax = 'ipython' },
             python = { cmd = 'python', formatter = 'trim_empty_lines', source_syntax = 'python' },
             R = { cmd = 'R', formatter = 'trim_empty_lines', source_syntax = 'R' },
-            -- bash version >= 4.4 supports bracketed paste mode. but macos
-            -- shipped with bash 3.2, so we don't use bracketed paste mode for
-            -- macOS
             bash = {
                 cmd = 'bash',
                 formatter = vim.fn.has 'linux' == 1 and 'bracketed_pasting' or 'trim_empty_lines',
                 source_syntax = 'bash',
             },
             zsh = { cmd = 'zsh', formatter = 'bracketed_pasting', source_syntax = 'bash' },
-            -- Example of enabling virtual text for a specific REPL:
-            -- mylua = {
-            --     cmd = 'lua',
-            --     formatter = 'trim_empty_lines',
-            --     source_syntax = 'lua',
-            --     virtual_text_when_source_content = { -- Per-REPL override for virtual text settings
-            --         enabled = true,
-            --         hl_group = 'MoreMsg',
-            --         -- delay_ms can also be overridden if desired, though typically global
-            --     }
-            -- },
         },
         close_on_exit = true,
         scroll_to_bottom_after_sending = true,
-        -- Format REPL buffer names as #repl_name#n (e.g., #ipython#1) instead of using terminal defaults
         format_repl_buffers_names = true,
         os = {
             windows = {
@@ -50,9 +35,8 @@ local default_config = function()
             },
         },
         virtual_text_when_source_content = {
-            enabled_default = false, -- Global default for enabling virtual text on source
-            hl_group_default = 'Comment', -- Default highlight group for YAREPL virtual text
-            delay_ms = 200, -- Delay in milliseconds to wait for REPL to echo command
+            enabled_default = false,
+            hl_group_default = 'Comment',
         },
     }
 end
@@ -64,48 +48,65 @@ local function repl_is_valid(repl)
     return repl ~= nil and api.nvim_buf_is_loaded(repl.bufnr)
 end
 
--- rearrange repls such that there's no gap in the repls table.
 local function repl_cleanup()
-    local valid_repls = {}
-    local valid_repls_id = {}
-    for id, repl in pairs(M._repls) do
-        if repl_is_valid(repl) then
-            table.insert(valid_repls_id, id)
+    local valid_repl_objects = {}
+    local ids_to_remove = {}
+    for id, repl_obj in pairs(M._repls) do
+        if not repl_is_valid(repl_obj) then
+            if repl_obj and repl_obj.bufnr and api.nvim_buf_is_loaded(repl_obj.bufnr) then
+                pcall(api.nvim_buf_detach, repl_obj.bufnr)
+            end
+            table.insert(ids_to_remove, id)
         end
     end
+    for _, id in ipairs(ids_to_remove) do
+        M._repls[id] = nil
+    end
 
-    for bufnr, repl in pairs(M._bufnrs_to_repls) do
-        if not repl_is_valid(repl) then
+    local temp_valid_repls_seq = {}
+    local sorted_valid_ids = {}
+    for id, _ in pairs(M._repls) do
+        if type(id) == "number" then
+            table.insert(sorted_valid_ids, id)
+        end
+    end
+    table.sort(sorted_valid_ids)
+
+    for _, id in ipairs(sorted_valid_ids) do
+        table.insert(temp_valid_repls_seq, M._repls[id])
+    end
+    M._repls = temp_valid_repls_seq
+
+
+    for bufnr, repl_obj in pairs(M._bufnrs_to_repls) do
+        local still_valid = false
+        for _, valid_repl in ipairs(M._repls) do
+            if valid_repl == repl_obj then
+                still_valid = true
+                break
+            end
+        end
+        if not still_valid then
             M._bufnrs_to_repls[bufnr] = nil
         end
-
         if not api.nvim_buf_is_loaded(bufnr) then
             M._bufnrs_to_repls[bufnr] = nil
         end
     end
 
-    table.sort(valid_repls_id)
-
-    for _, id in ipairs(valid_repls_id) do
-        table.insert(valid_repls, M._repls[id])
-    end
-    M._repls = valid_repls
-
     if M._config.format_repl_buffers_names then
-        for id, repl in pairs(M._repls) do
-            -- to avoid name conflict, we add a temp prefix
-            api.nvim_buf_set_name(repl.bufnr, string.format('#%s#temp#%d', repl.name, id))
+        for id, repl_obj in ipairs(M._repls) do
+            api.nvim_buf_set_name(repl_obj.bufnr, string.format('#%s#temp#%d', repl_obj.name, id))
         end
-
-        for id, repl in pairs(M._repls) do
-            api.nvim_buf_set_name(repl.bufnr, string.format('#%s#%d', repl.name, id))
+        for id, repl_obj in ipairs(M._repls) do
+            api.nvim_buf_set_name(repl_obj.bufnr, string.format('#%s#%d', repl_obj.name, id))
         end
     end
 end
 
+
 local function focus_repl(repl)
     if not repl_is_valid(repl) then
-        -- if id is nil, print it as -1
         vim.notify [[REPL doesn't exist!]]
         return
     end
@@ -125,7 +126,7 @@ local function focus_repl(repl)
 end
 
 local function create_repl(id, repl_name)
-    if repl_is_valid(M._repls[id]) then
+    if M._repls[id] and repl_is_valid(M._repls[id]) then
         vim.notify(string.format('REPL %d already exists, no new REPL is created', id))
         return
     end
@@ -139,7 +140,6 @@ local function create_repl(id, repl_name)
     vim.bo[bufnr].filetype = M._config.ft
 
     local cmd
-
     if type(M._config.metas[repl_name].cmd) == 'function' then
         cmd = M._config.metas[repl_name].cmd()
     else
@@ -147,7 +147,6 @@ local function create_repl(id, repl_name)
     end
 
     local wincmd = M._config.metas[repl_name].wincmd or M._config.wincmd
-
     if type(wincmd) == 'function' then
         wincmd(bufnr, repl_name)
     else
@@ -155,16 +154,19 @@ local function create_repl(id, repl_name)
         api.nvim_set_current_buf(bufnr)
     end
 
-    local opts = {}
-    opts.on_exit = function()
+    local current_repl_obj_ref = {}
+
+    local opts_for_termopen = {}
+    opts_for_termopen.on_exit = function(_, _, _)
+        if api.nvim_buf_is_loaded(bufnr) then
+            pcall(api.nvim_buf_detach, bufnr)
+        end
         if M._config.close_on_exit then
             local bufwinid = fn.bufwinid(bufnr)
             while bufwinid ~= -1 do
                 api.nvim_win_close(bufwinid, true)
                 bufwinid = fn.bufwinid(bufnr)
             end
-            -- It is possible that this buffer has already been deleted, before
-            -- the process is exit.
             if api.nvim_buf_is_loaded(bufnr) then
                 api.nvim_buf_delete(bufnr, { force = true })
             end
@@ -173,31 +175,74 @@ local function create_repl(id, repl_name)
     end
 
     ---@diagnostic disable-next-line: redefined-local
-    local function termopen(cmd, opts)
+    local function termopen(cmd_str, term_opts)
         if vim.fn.has 'nvim-0.11' == 1 then
-            opts.term = true
-            return vim.fn.jobstart(cmd, opts)
+            term_opts.term = true
+            return vim.fn.jobstart(cmd_str, term_opts)
         else
-            return vim.fn.termopen(cmd, opts)
+            return vim.fn.termopen(cmd_str, term_opts)
         end
     end
+    local term_job_id = termopen(cmd, opts_for_termopen)
 
-    local term = termopen(cmd, opts)
+    M._repls[id] = {
+        bufnr = bufnr,
+        term = term_job_id,
+        name = repl_name,
+        pending_virt_text_info = nil
+    }
+    current_repl_obj_ref.value = M._repls[id]
+
+    local attach_success = pcall(api.nvim_buf_attach, bufnr, false, {
+        on_lines = function(_, attached_bufnr, _, _, _, new_lastline, _)
+            local current_repl = current_repl_obj_ref.value
+            if not current_repl or not current_repl.pending_virt_text_info or not repl_is_valid(current_repl) then
+                return
+            end
+            if attached_bufnr ~= current_repl.bufnr then return end
+
+            local pending_info = current_repl.pending_virt_text_info
+
+            local scan_start_line = math.max(0, new_lastline - 20)
+            local lines_in_repl_chunk = api.nvim_buf_get_lines(attached_bufnr, scan_start_line, new_lastline + 1, false)
+            local found_cmd_line_0idx_absolute = -1
+
+            for i = #lines_in_repl_chunk, 1, -1 do
+                if lines_in_repl_chunk[i]:find(pending_info.command_to_match, 1, true) then
+                    found_cmd_line_0idx_absolute = scan_start_line + (i - 1)
+                    break
+                end
+            end
+
+            if found_cmd_line_0idx_absolute ~= -1 then
+                current_repl.pending_virt_text_info = nil
+
+                local virt_lines_opts = {
+                    virt_lines = {{{pending_info.comment_text, pending_info.hl_group}}},
+                    virt_lines_above = false,
+                }
+                api.nvim_buf_set_extmark(attached_bufnr, M._virt_text_ns_id, found_cmd_line_0idx_absolute, 0, virt_lines_opts)
+            end
+        end
+    })
+    if not attach_success then
+        vim.notify("YAREPL: Failed to attach 'on_lines' listener to REPL buffer " .. bufnr, vim.log.levels.ERROR)
+    end
+
     if M._config.format_repl_buffers_names then
         api.nvim_buf_set_name(bufnr, string.format('#%s#%d', repl_name, id))
     end
-    M._repls[id] = { bufnr = bufnr, term = term, name = repl_name }
 end
 
--- get the id of the closest repl whose name is `NAME` from the `ID`
+
 local function find_closest_repl_from_id_with_name(id, name)
     local closest_id = nil
     local closest_distance = math.huge
-    for repl_id, repl in pairs(M._repls) do
+    for repl_idx, repl in ipairs(M._repls) do
         if repl.name == name then
-            local distance = math.abs(repl_id - id)
+            local distance = math.abs(repl_idx - id)
             if distance < closest_distance then
-                closest_id = repl_id
+                closest_id = repl_idx
                 closest_distance = distance
             end
             if distance == 0 then
@@ -237,14 +282,6 @@ M.bufnr_is_attached_to_repl = function(bufnr)
     end
 end
 
----@param id number|nil the id of the repl,
----@param name string|nil the name of the closest repl that will try to find
----@param bufnr number|nil the buffer number of the buffer
----@return table|nil repl the repl object or nil if not found
--- get the repl specified by `id` and `name`. If `id` is 0, then will try to
--- find the REPL `bufnr` is attached to, if not find, will use `id = 1`. If
--- `name` is not nil or not an empty string, then will try to find the REPL
--- with `name` relative to `id`.
 function M._get_repl(id, name, bufnr)
     local repl
     if id == nil or id == 0 then
@@ -258,8 +295,17 @@ function M._get_repl(id, name, bufnr)
     end
 
     if name ~= nil and name ~= '' then
-        id = find_closest_repl_from_id_with_name(id, name)
-        repl = M._repls[id]
+        local base_id_for_search = id
+        if M._bufnrs_to_repls[bufnr] == repl then
+             for idx, r_obj in ipairs(M._repls) do if r_obj == repl then base_id_for_search = idx break end end
+        end
+
+        local found_idx_by_name = find_closest_repl_from_id_with_name(base_id_for_search, name)
+        if found_idx_by_name then
+             repl = M._repls[found_idx_by_name]
+        else
+             repl = nil
+        end
     end
 
     if not repl_is_valid(repl) then
@@ -269,7 +315,7 @@ function M._get_repl(id, name, bufnr)
     return repl
 end
 
-local function repl_win_scroll_to_bottom(repl)
+local function repl_win_scroll_to_bottom(repl) -- Defined as local function
     if not repl_is_valid(repl) then
         vim.notify [[REPL doesn't exist!]]
         return
@@ -282,7 +328,6 @@ local function repl_win_scroll_to_bottom(repl)
     end
 end
 
--- currently only support line-wise sending in both visual and operator mode.
 local function get_lines(mode)
     local begin_mark = mode == 'operator' and "'[" or "'<"
     local end_mark = mode == 'operator' and "']" or "'>"
@@ -292,10 +337,6 @@ local function get_lines(mode)
     return api.nvim_buf_get_lines(0, begin_line - 1, end_line, false)
 end
 
----Get the formatter function from either a string name or function
----@param formatter string|function The formatter name or function
----@return function Formatter function to use
----@throws string Error if formatter name is unknown
 local function get_formatter(formatter)
     if type(formatter) == 'string' then
         return M.formatter[formatter] or error('Unknown formatter: ' .. formatter)
@@ -303,7 +344,7 @@ local function get_formatter(formatter)
     return formatter
 end
 
-function M.formatter.factory(opts)
+M.formatter.factory = function(opts)
     if type(opts) ~= 'table' then
         error 'opts must be a table'
     end
@@ -316,12 +357,6 @@ function M.formatter.factory(opts)
             end_code = '\r',
             trim_empty_lines = false,
             remove_leading_spaces = false,
-            -- If gsub_pattern and gsub_repl are not empty, `string.gsub` will
-            -- be called with `gsub_pattern` and `gsub_repl` on each line. Note
-            -- that you should use Lua pattern instead of Vim regex pattern.
-            -- The gsub calls happen after `trim_empty_lines`,
-            -- `remove_leading_spaces`, and `replace_tab_by_space`, and before
-            -- prepending and appending `open_code` and `end_code`.
             gsub_pattern = '',
             gsub_repl = '',
         },
@@ -347,7 +382,6 @@ function M.formatter.factory(opts)
             end
 
             lines[1] = lines[1]:gsub(config.when_single_line.gsub_pattern, config.when_single_line.gsub_repl)
-
             lines[1] = config.when_single_line.open_code .. lines[1] .. config.when_single_line.end_code
             return lines
         end
@@ -357,28 +391,21 @@ function M.formatter.factory(opts)
 
         line = line:gsub(config.when_multi_lines.gsub_pattern, config.when_multi_lines.gsub_repl)
         line = config.when_multi_lines.open_code .. line
-
         table.insert(formatted_lines, line)
 
         for i = 2, #lines do
             line = lines[i]
-
             if config.when_multi_lines.trim_empty_lines and line == '' then
                 goto continue
             end
-
             if config.when_multi_lines.remove_leading_spaces then
                 line = line:gsub('^%s+', '')
             end
-
             if config.replace_tab_by_space then
                 line = line:gsub('\t', string.rep(' ', config.number_of_spaces_to_replace_tab))
             end
-
             line = line:gsub(config.when_multi_lines.gsub_pattern, config.when_multi_lines.gsub_repl)
-
             table.insert(formatted_lines, line)
-
             ::continue::
         end
 
@@ -386,20 +413,6 @@ function M.formatter.factory(opts)
             table.insert(formatted_lines, config.when_multi_lines.end_code)
         end
 
-        -- The `chansend` function joins lines with `\n`, which can result in a
-        -- large number of unnecessary blank lines being sent to the REPL. For
-        -- example, `{ "hello", "world", "again!" }` would be sent to the REPL
-        -- as:
-
-        -- ```
-        -- hello
-        --
-        -- world
-        --
-        -- again!
-        -- ```
-
-        -- To prevent this issue, we manually join lines with `\r` on Windows.
         if is_win32 and config.os.windows.join_lines_with_cr then
             formatted_lines = { table.concat(formatted_lines, '\r') }
         end
@@ -428,78 +441,6 @@ M.formatter.bracketed_pasting_no_final_new_line = M.formatter.factory {
     },
 }
 
---- Displays the source comment as virtual text in the REPL buffer.
----@param repl table The REPL object.
----@param original_strings string[] The original strings/code block sent by the user.
----@param command_to_match string The first line of the command sent to REPL, used for anchoring.
-local function _display_source_comment_virtual_text(repl, original_strings, command_to_match)
-    if not repl_is_valid(repl) or not M._virt_text_ns_id then
-        return
-    end
-    if not command_to_match or command_to_match == '' then
-        return
-    end
-
-    local repl_meta = M._config.metas[repl.name]
-    local vt_config = repl_meta.virtual_text_when_source_content
-
-    local code_part_for_display = 'YAREPL'
-    if original_strings and #original_strings > 0 then
-        for _, line_str in ipairs(original_strings) do
-            local trimmed_line = vim.fn.trim(line_str)
-            if #trimmed_line > 0 then
-                code_part_for_display = trimmed_line
-                break
-            end
-        end
-    end
-
-    local comment_text = string.format('%s - %s', os.date '%H:%M:%S', code_part_for_display)
-
-    if not comment_text or comment_text == '' then
-        return
-    end
-
-    local delay_ms_to_use = vt_config.delay_ms
-
-    vim.defer_fn(function()
-        if not repl_is_valid(repl) then
-            return
-        end
-
-        local repl_bufnr_target = repl.bufnr
-        local lines_in_repl = api.nvim_buf_get_lines(repl_bufnr_target, 0, -1, false)
-        local found_cmd_line_0idx = -1
-
-        for i = #lines_in_repl, 1, -1 do
-            if lines_in_repl[i]:find(command_to_match, 1, true) then
-                found_cmd_line_0idx = i - 1
-                break
-            end
-        end
-
-        if found_cmd_line_0idx ~= -1 then
-            local hl_group = vt_config.hl_group
-            local virt_lines_opts = {
-                virt_lines = { { { comment_text, hl_group } } },
-                virt_lines_above = false,
-            }
-            api.nvim_buf_set_extmark(repl_bufnr_target, M._virt_text_ns_id, found_cmd_line_0idx, 0, virt_lines_opts)
-        end
-    end, delay_ms_to_use)
-end
-
----@param id number the id of the repl,
----@param name string? the name of the closest repl that will try to find
----@param bufnr number? the buffer number from which to find the attached REPL.
----@param strings string[] a list of strings
----@param use_formatter boolean? whether use formatter (e.g. bracketed_pasting)? Default: true
----@param source_content boolean? Whether use source_syntax (defined by REPL meta) Default: false
--- Send a list of strings to the repl specified by `id` and `name` and `bufnr`.
--- If `id` is 0, then will try to find the REPL that `bufnr` is attached to, if
--- not find, will use `id = 1`. If `name` is not nil or not an empty string,
--- then will try to find the REPL with `name` relative to `id`. If `bufnr` is
--- nil or `bufnr` = 0, will find the REPL that current buffer is attached to.
 M._send_strings = function(id, name, bufnr, strings, use_formatter, source_content)
     use_formatter = use_formatter == nil and true or use_formatter
     if bufnr == nil or bufnr == 0 then
@@ -514,66 +455,81 @@ M._send_strings = function(id, name, bufnr, strings, use_formatter, source_conte
     end
 
     local meta = M._config.metas[repl.name]
-    if source_content then
-        local source_syntax = M.source_syntaxes[meta.source_syntax] or meta.source_syntax
+    local strings_to_send_to_repl_process = strings
 
-        if not source_syntax then
+    if source_content then
+        local source_syntax_config = meta.source_syntax
+        local source_syntax_processor = M.source_syntaxes[source_syntax_config] or source_syntax_config
+        local constructed_source_command
+
+        if not source_syntax_processor then
             vim.notify(
                 'No source syntax or source function is available for '
-                    .. repl.name
-                    .. '. Fallback to send string directly.'
+                .. repl.name
+                .. '. Fallback to send string directly.'
             )
-        end
-
-        local content = table.concat(strings, '\n')
-
-        local source_command_sent_to_repl
-
-        if type(source_syntax) == 'string' then
-            source_command_sent_to_repl = M.source_file_with_source_syntax(content, source_syntax)
-        elseif type(source_syntax) == 'function' then
-            source_command_sent_to_repl = source_syntax(content)
-        end
-
-        if source_command_sent_to_repl and source_command_sent_to_repl ~= '' then
-            if meta.virtual_text_when_source_content and meta.virtual_text_when_source_content.enabled then
-                local command_to_match_in_repl = vim.split(source_command_sent_to_repl, '\n')[1]
-                _display_source_comment_virtual_text(repl, strings, command_to_match_in_repl)
+            constructed_source_command = table.concat(strings, '\n')
+        else
+            local content = table.concat(strings, '\n')
+            if type(source_syntax_processor) == 'string' then
+                constructed_source_command = M.source_file_with_source_syntax(content, source_syntax_processor)
+            elseif type(source_syntax_processor) == 'function' then
+                constructed_source_command = source_syntax_processor(content)
             end
-            strings = vim.split(source_command_sent_to_repl, '\n')
         end
-    else
-        strings = strings
+
+        if constructed_source_command and constructed_source_command ~= '' then
+            if meta.virtual_text_when_source_content and meta.virtual_text_when_source_content.enabled then
+                local command_to_match_in_repl = vim.split(constructed_source_command, '\n')[1]
+
+                local code_part_for_display = "YAREPL"
+                if strings and #strings > 0 then
+                    for _, line_str in ipairs(strings) do
+                        local trimmed_line = vim.fn.trim(line_str)
+                        if #trimmed_line > 0 then
+                            code_part_for_display = trimmed_line
+                            break
+                        end
+                    end
+                end
+                local comment_text_for_virt = string.format('%s - %s', os.date '%H:%M:%S', code_part_for_display)
+
+                repl.pending_virt_text_info = {
+                    command_to_match = command_to_match_in_repl,
+                    comment_text = comment_text_for_virt,
+                    hl_group = meta.virtual_text_when_source_content.hl_group
+                }
+            end
+            strings_to_send_to_repl_process = vim.split(constructed_source_command, '\n')
+        else
+            -- strings_to_send_to_repl_process remains original strings
+        end
     end
 
     if use_formatter then
-        strings = meta.formatter(strings)
+        strings_to_send_to_repl_process = meta.formatter(strings_to_send_to_repl_process)
     end
 
-    fn.chansend(repl.term, strings)
+    fn.chansend(repl.term, strings_to_send_to_repl_process)
 
-    -- See https://github.com/milanglacier/yarepl.nvim/issues/12 and
-    -- https://github.com/urbainvaes/vim-ripple/issues/12 for more information.
-    -- It may be necessary to use a delayed `<CR>` on Windows to ensure that
-    -- the code is executed in the REPL.
     if is_win32 and M._config.os.windows.send_delayed_cr_after_sending then
         vim.defer_fn(function()
             if repl_is_valid(repl) then
-                fn.chansend(repl.term, '\r')
+                 fn.chansend(repl.term, '\r')
             end
         end, 100)
     end
 
     if M._config.scroll_to_bottom_after_sending then
-        repl_win_scroll_to_bottom(repl)
+        repl_win_scroll_to_bottom(repl) -- Changed to call local function
     end
 end
 
 M._send_operator_internal = function(motion)
-    -- hack: allow dot-repeat
     if motion == nil then
         vim.go.operatorfunc = [[v:lua.require'yarepl'._send_operator_internal]]
         api.nvim_feedkeys('g@', 'ni', false)
+        return
     end
 
     local id = vim.b[0].repl_id
@@ -591,10 +547,10 @@ M._send_operator_internal = function(motion)
 end
 
 M._source_operator_internal = function(motion)
-    -- hack: allow dot-repeat
     if motion == nil then
         vim.go.operatorfunc = [[v:lua.require'yarepl'._source_operator_internal]]
         api.nvim_feedkeys('g@', 'ni', false)
+        return
     end
 
     local id = vim.b[0].repl_id
@@ -616,29 +572,19 @@ local function run_cmd_with_count(cmd)
 end
 
 local function partial_cmd_with_count_expr(cmd)
-    -- <C-U> is equivalent to \21, we want to clear the range before
-    -- next input to ensure the count is recognized correctly.
     return ':\21' .. vim.v.count .. cmd
 end
 
 local function add_keymap(meta_name)
-    -- replace non alpha numeric and - _ keys to dash
     if meta_name then
         meta_name = meta_name:gsub('[^%w-_]', '-')
     end
-
     local suffix = meta_name and ('-' .. meta_name) or ''
 
     local mode_commands = {
-        { 'n', 'REPLStart' },
-        { 'n', 'REPLFocus' },
-        { 'n', 'REPLHide' },
-        { 'n', 'REPLHideOrFocus' },
-        { 'n', 'REPLSendLine' },
-        { 'n', 'REPLSendOperator' },
-        { 'v', 'REPLSendVisual' },
-        { 'n', 'REPLSourceOperator' },
-        { 'v', 'REPLSourceVisual' },
+        { 'n', 'REPLStart' }, { 'n', 'REPLFocus' }, { 'n', 'REPLHide' },
+        { 'n', 'REPLHideOrFocus' }, { 'n', 'REPLSendLine' }, { 'n', 'REPLSendOperator' },
+        { 'v', 'REPLSendVisual' }, { 'n', 'REPLSourceOperator' }, { 'v', 'REPLSourceVisual' },
         { 'n', 'REPLClose' },
     }
 
@@ -655,7 +601,6 @@ local function add_keymap(meta_name)
         })
     end
 
-    -- setting up keymaps for REPLExec is more complicated, setting it independently
     api.nvim_set_keymap('n', string.format('<Plug>(%s%s)', 'REPLExec', suffix), '', {
         noremap = true,
         callback = function()
@@ -670,84 +615,45 @@ local function add_keymap(meta_name)
 end
 
 M.commands.start = function(opts)
-    -- if calling the command without any count, we want count to become 1.
     local repl_name = opts.args
-    local id = opts.count == 0 and #M._repls + 1 or opts.count
-    local repl = M._repls[id]
-    local current_bufnr = api.nvim_get_current_buf()
+    local id_to_use = opts.count == 0 and (#M._repls + 1) or opts.count
 
-    if repl_is_valid(repl) then
-        vim.notify(string.format('REPL %d already exists', id))
-        focus_repl(repl)
-        return
+    if M._repls[id_to_use] and repl_is_valid(M._repls[id_to_use]) then
+         vim.notify(string.format('REPL %d already exists', id_to_use))
+         focus_repl(M._repls[id_to_use])
+         return
     end
 
+    local current_bufnr = api.nvim_get_current_buf()
+
     if repl_name == '' then
-        local repls = {}
-        for name, _ in pairs(M._config.metas) do
-            table.insert(repls, name)
-        end
-
-        vim.ui.select(repls, {
-            prompt = 'Select REPL: ',
-        }, function(choice)
-            if not choice then
-                return
-            end
-
+        local repls_available = {}
+        for name_key, _ in pairs(M._config.metas) do table.insert(repls_available, name_key) end
+        vim.ui.select(repls_available, { prompt = 'Select REPL: ' }, function(choice)
+            if not choice then return end
             repl_name = choice
-            create_repl(id, repl_name)
-
-            if opts.bang then
-                attach_buffer_to_repl(current_bufnr, M._repls[id])
-            end
-
-            if M._config.scroll_to_bottom_after_sending then
-                repl_win_scroll_to_bottom(M._repls[id])
-            end
+            create_repl(id_to_use, repl_name)
+            if opts.bang and M._repls[id_to_use] then attach_buffer_to_repl(current_bufnr, M._repls[id_to_use]) end
+            if M._config.scroll_to_bottom_after_sending and M._repls[id_to_use] then repl_win_scroll_to_bottom(M._repls[id_to_use]) end -- Changed to call local function
         end)
     else
-        create_repl(id, repl_name)
-
-        if opts.bang then
-            attach_buffer_to_repl(current_bufnr, M._repls[id])
-        end
-
-        if M._config.scroll_to_bottom_after_sending then
-            repl_win_scroll_to_bottom(M._repls[id])
-        end
+        create_repl(id_to_use, repl_name)
+        if opts.bang and M._repls[id_to_use] then attach_buffer_to_repl(current_bufnr, M._repls[id_to_use]) end
+        if M._config.scroll_to_bottom_after_sending and M._repls[id_to_use] then repl_win_scroll_to_bottom(M._repls[id_to_use]) end -- Changed to call local function
     end
 end
 
 M.commands.cleanup = repl_cleanup
 
 M.commands.focus = function(opts)
-    local id = opts.count
-    local name = opts.args
-    local current_buffer = api.nvim_get_current_buf()
-
-    local repl = M._get_repl(id, name, current_buffer)
-
-    if not repl then
-        vim.notify [[REPL doesn't exist!]]
-        return
-    end
-
+    local repl = M._get_repl(opts.count, opts.args, api.nvim_get_current_buf())
+    if not repl then vim.notify [[REPL doesn't exist!]]; return end
     focus_repl(repl)
 end
 
 M.commands.hide = function(opts)
-    local id = opts.count
-    local name = opts.args
-    local current_buffer = api.nvim_get_current_buf()
-
-    local repl = M._get_repl(id, name, current_buffer)
-
-    if not repl then
-        vim.notify [[REPL doesn't exist!]]
-        return
-    end
-
+    local repl = M._get_repl(opts.count, opts.args, api.nvim_get_current_buf())
+    if not repl then vim.notify [[REPL doesn't exist!]]; return end
     local bufnr = repl.bufnr
     local win = fn.bufwinid(bufnr)
     while win ~= -1 do
@@ -757,23 +663,13 @@ M.commands.hide = function(opts)
 end
 
 M.commands.hide_or_focus = function(opts)
-    local id = opts.count
-    local name = opts.args
-    local current_buffer = api.nvim_get_current_buf()
-
-    local repl = M._get_repl(id, name, current_buffer)
-
-    if not repl then
-        vim.notify [[REPL doesn't exist!]]
-        return
-    end
-
-    local bufnr = repl.bufnr
-    local win = fn.bufwinid(bufnr)
+    local repl = M._get_repl(opts.count, opts.args, api.nvim_get_current_buf())
+    if not repl then vim.notify [[REPL doesn't exist!]]; return end
+    local win = fn.bufwinid(repl.bufnr)
     if win ~= -1 then
         while win ~= -1 do
             api.nvim_win_close(win, true)
-            win = fn.bufwinid(bufnr)
+            win = fn.bufwinid(repl.bufnr)
         end
     else
         focus_repl(repl)
@@ -781,118 +677,87 @@ M.commands.hide_or_focus = function(opts)
 end
 
 M.commands.close = function(opts)
-    local id = opts.count
-    local name = opts.args
-    local current_buffer = api.nvim_get_current_buf()
-
-    local repl = M._get_repl(id, name, current_buffer)
-
-    if not repl then
-        vim.notify [[REPL doesn't exist!]]
-        return
-    end
-
-    fn.chansend(repl.term, string.char(4))
+    local repl = M._get_repl(opts.count, opts.args, api.nvim_get_current_buf())
+    if not repl then vim.notify [[REPL doesn't exist!]]; return end
+    if repl_is_valid(repl) then fn.chansend(repl.term, string.char(4)) end
 end
 
 M.commands.swap = function(opts)
     local id_1 = tonumber(opts.fargs[1])
     local id_2 = tonumber(opts.fargs[2])
-
-    if id_1 ~= nil and id_2 ~= nil then
-        repl_swap(id_1, id_2)
+    if id_1 and id_2 then
+        if M._repls[id_1] and M._repls[id_2] then
+            repl_swap(id_1, id_2)
+        else
+            vim.notify("One or both REPL IDs are invalid.", vim.log.levels.ERROR)
+        end
         return
     end
 
-    local repl_ids = {}
-    for id, _ in pairs(M._repls) do
-        table.insert(repl_ids, id)
+    local repl_ids_available = {}
+    for id_key, _ in ipairs(M._repls) do table.insert(repl_ids_available, id_key) end
+
+    if #repl_ids_available < 2 then
+        vim.notify("Not enough REPLs to swap.", vim.log.levels.WARN)
+        return
     end
 
-    table.sort(repl_ids)
-
-    if id_1 == nil then
-        vim.ui.select(repl_ids, {
-            prompt = 'select first REPL',
-            format_item = function(item)
-                return item .. ' ' .. M._repls[item].name
-            end,
-        }, function(id1)
-            if not id1 then
-                return
-            end
-
-            vim.ui.select(repl_ids, {
-                prompt = 'select second REPL',
-                format_item = function(item)
-                    return item .. ' ' .. M._repls[item].name
-                end,
-            }, function(id2)
-                if not id2 then
-                    return
-                end
-
-                repl_swap(id1, id2)
+    local format_item = function(item_id) return item_id .. ' ' .. M._repls[item_id].name end
+    if not id_1 then
+        vim.ui.select(repl_ids_available, { prompt = 'select first REPL', format_item = format_item }, function(id1_choice)
+            if not id1_choice then return end
+            local remaining_ids = vim.tbl_filter(function(id_val) return id_val ~= id1_choice end, repl_ids_available)
+            if #remaining_ids == 0 then vim.notify("No other REPL to swap with.", vim.log.levels.WARN); return end
+            vim.ui.select(remaining_ids, { prompt = 'select second REPL', format_item = format_item }, function(id2_choice)
+                if not id2_choice then return end
+                repl_swap(id1_choice, id2_choice)
             end)
         end)
-    elseif id_2 == nil then
-        vim.ui.select(repl_ids, {
-            prompt = 'select second REPL',
-            format_item = function(item)
-                return item .. ' ' .. M._repls[item].name
-            end,
-        }, function(id2)
-            if not id2 then
-                return
-            end
-
-            repl_swap(id_1, id2)
+    elseif not id_2 then
+         local remaining_ids = vim.tbl_filter(function(id_val) return id_val ~= id_1 end, repl_ids_available)
+         if #remaining_ids == 0 then vim.notify("No other REPL to swap with ID " .. id_1, vim.log.levels.WARN); return end
+        vim.ui.select(remaining_ids, { prompt = 'select second REPL', format_item = format_item }, function(id2_choice)
+            if not id2_choice then return end
+            repl_swap(id_1, id2_choice)
         end)
     end
 end
 
 M.commands.attach_buffer = function(opts)
-    local current_buffer = api.nvim_get_current_buf()
+    local current_bufnr = api.nvim_get_current_buf()
+    if opts.bang then M._bufnrs_to_repls[current_bufnr] = nil; return end
+    local repl_id_arg = opts.count
 
-    if opts.bang then
-        M._bufnrs_to_repls[current_buffer] = nil
+    local repl_ids_available = {}
+    for id_key, repl_obj in ipairs(M._repls) do if repl_is_valid(repl_obj) then table.insert(repl_ids_available, id_key) end end
+
+    if #repl_ids_available == 0 then
+        vim.notify("No valid REPLs available to attach.", vim.log.levels.WARN)
         return
     end
 
-    local repl_id = opts.count
-
-    local repl_ids = {}
-    for id, _ in pairs(M._repls) do
-        table.insert(repl_ids, id)
-    end
-
-    -- count = 0 means no count is provided
-    if repl_id == 0 then
-        vim.ui.select(repl_ids, {
-            prompt = 'select REPL that you want to attach to',
-            format_item = function(item)
-                return item .. ' ' .. M._repls[item].name
-            end,
-        }, function(id)
-            if not id then
-                return
-            end
-            attach_buffer_to_repl(current_buffer, M._repls[id])
+    if repl_id_arg == 0 then
+        vim.ui.select(repl_ids_available, { prompt = 'Select REPL to attach', format_item = function(item_id) return item_id .. ' ' .. M._repls[item_id].name end }, function(id_choice)
+            if not id_choice then return end
+            attach_buffer_to_repl(current_bufnr, M._repls[id_choice])
         end)
     else
-        attach_buffer_to_repl(current_buffer, M._repls[repl_id])
+        if M._repls[repl_id_arg] and repl_is_valid(M._repls[repl_id_arg]) then
+            attach_buffer_to_repl(current_bufnr, M._repls[repl_id_arg])
+        else
+            vim.notify("REPL with ID " .. repl_id_arg .. " not found or is invalid.", vim.log.levels.ERROR)
+        end
     end
 end
 
 M.commands.detach_buffer = function()
-    local current_buffer = api.nvim_get_current_buf()
-    M._bufnrs_to_repls[current_buffer] = nil
+    M._bufnrs_to_repls[api.nvim_get_current_buf()] = nil
 end
 
 M.commands.send_visual = function(opts)
     local id = opts.count
     local name = opts.args
-    local current_buffer = api.nvim_get_current_buf()
+    local current_bufnr = api.nvim_get_current_buf()
 
     api.nvim_feedkeys('\27', 'nx', false)
 
@@ -903,35 +768,22 @@ M.commands.send_visual = function(opts)
         return
     end
 
-    M._send_strings(id, name, current_buffer, lines, nil, opts.source_content)
+    M._send_strings(id, name, current_bufnr, lines, nil, opts.source_content)
 end
 
 M.commands.send_line = function(opts)
     local id = opts.count
     local name = opts.args
-    local current_buffer = api.nvim_get_current_buf()
+    local current_bufnr = api.nvim_get_current_buf()
 
     local line = api.nvim_get_current_line()
 
-    M._send_strings(id, name, current_buffer, { line })
+    M._send_strings(id, name, current_bufnr, { line })
 end
 
 M.commands.send_operator = function(opts)
-    local repl_name = opts.args
-    local id = opts.count
-
-    if repl_name ~= '' then
-        vim.b[0].closest_repl_name = repl_name
-    else
-        vim.b[0].closest_repl_name = nil
-    end
-
-    if id ~= 0 then
-        vim.b[0].repl_id = id
-    else
-        vim.b[0].repl_id = nil
-    end
-
+    vim.b[0].closest_repl_name = opts.args ~= '' and opts.args or nil
+    vim.b[0].repl_id = opts.count ~= 0 and opts.count or nil
     vim.go.operatorfunc = opts.source_content and [[v:lua.require'yarepl'._source_operator_internal]]
         or [[v:lua.require'yarepl'._send_operator_internal]]
     api.nvim_feedkeys('g@', 'ni', false)
@@ -949,112 +801,72 @@ end
 
 M.commands.exec = function(opts)
     local first_arg = opts.fargs[1]
-    local current_buffer = api.nvim_get_current_buf()
-    local name = ''
-    local command = opts.args
+    local current_bufnr = api.nvim_get_current_buf()
+    local name_match = ''
+    local command_to_exec = opts.args
 
-    for repl_name, _ in pairs(M._config.metas) do
-        if '$' .. repl_name == first_arg then
-            name = first_arg:sub(2)
+    for repl_name_key, _ in pairs(M._config.metas) do
+        if '$' .. repl_name_key == first_arg then
+            name_match = repl_name_key
             break
         end
     end
 
-    if name ~= '' then
-        command = command:gsub('^%$' .. name .. '%s+', '')
+    if name_match ~= '' then
+        command_to_exec = command_to_exec:gsub('^%$' .. name_match .. '%s+', '')
     end
 
-    local id = opts.count
-    local command_list = vim.split(command, '\r')
-
-    M._send_strings(id, name, current_buffer, command_list)
+    local id_arg = opts.count
+    local command_list = vim.split(command_to_exec, '\r')
+    M._send_strings(id_arg, name_match, current_bufnr, command_list)
 end
 
----@param content string
----@param keep_file boolean? Whether keep the temporary file after temporary execution
----@return string? The file name of the temporary file
 function M.make_tmp_file(content, keep_file)
-    local tmp_file = os.tmpname() .. '_yarepl'
-
+    local tmp_file = fn.tempname() .. '_yarepl'
     local f = io.open(tmp_file, 'w+')
     if f == nil then
-        M.notify('Cannot open temporary message file: ' .. tmp_file, 'error', vim.log.levels.ERROR)
+        vim.notify('Cannot open temporary message file: ' .. tmp_file, vim.log.levels.ERROR)
         return
     end
-
     f:write(content)
     f:close()
-
     if not keep_file then
-        vim.defer_fn(function()
-            os.remove(tmp_file)
-        end, 5000)
+        vim.defer_fn(function() os.remove(tmp_file) end, 5000)
     end
-
     return tmp_file
 end
 
----@param content string
----@param source_syntax string
----@param keep_file boolean?
----@reutrn string? The syntax to source the file
 function M.source_file_with_source_syntax(content, source_syntax, keep_file)
-    local tmp_file = os.tmpname() .. '_yarepl'
+    local tmp_file = M.make_tmp_file(content, keep_file)
+    if not tmp_file then return end
 
-    local f = io.open(tmp_file, 'w+')
-    if f == nil then
-        M.notify('Cannot open temporary message file: ' .. tmp_file, 'error', vim.log.levels.ERROR)
-        return
-    end
-
-    f:write(content)
-    f:close()
-
-    if not keep_file then
-        vim.defer_fn(function()
-            os.remove(tmp_file)
-        end, 5000)
-    end
-
-    -- replace {{file}} placeholder with the temp file name
     source_syntax = source_syntax:gsub('{{file}}', tmp_file)
-
     return source_syntax
 end
 
----@type table<string, string | fun(str: string): string?>
 M.source_syntaxes = {}
-
 M.source_syntaxes.python = function(str)
-    -- Preserve the temporary file since PDB requires its existence for
-    -- displaying context via the `list` command
     return M.source_file_with_source_syntax(
         str,
         'exec(compile(open("{{file}}", "r").read(), "{{file}}", "exec"))',
         true
     )
 end
-
 M.source_syntaxes.ipython = function(str)
-    -- The `-i` flag ensures the current environment is inherited when
-    -- executing the file
     return M.source_file_with_source_syntax(str, '%run -i "{{file}}"', true)
 end
-
 M.source_syntaxes.bash = 'source "{{file}}"'
 M.source_syntaxes.R = 'eval(parse(text = readr::read_file("{{file}}")))'
 M.source_syntaxes.aichat = '.file "{{file}}"'
 
 M.setup = function(opts)
     M._config = vim.tbl_deep_extend('force', default_config(), opts or {})
-    M._virt_text_ns_id = api.nvim_create_namespace 'YAREPLVirtText'
+    M._virt_text_ns_id = api.nvim_create_namespace('YAREPLVirtText')
 
-    for name, meta in pairs(M._config.metas) do
-        -- remove the disabled builtin meta passed from user config
+    for name_key, meta in pairs(M._config.metas) do
         if not meta then
-            M._config.metas[name] = nil
+            M._config.metas[name_key] = nil
         else
-            -- Convert string formatter names to actual formatter functions
             if meta.formatter then
                 meta.formatter = get_formatter(meta.formatter)
             end
@@ -1062,144 +874,39 @@ M.setup = function(opts)
             meta.virtual_text_when_source_content = meta.virtual_text_when_source_content or {}
 
             if meta.virtual_text_when_source_content.enabled == nil then
-                meta.virtual_text_when_source_content.enabled =
-                    M._config.virtual_text_when_source_content.enabled_default
+                meta.virtual_text_when_source_content.enabled = M._config.virtual_text_when_source_content.enabled_default
             end
             if meta.virtual_text_when_source_content.hl_group == nil then
-                meta.virtual_text_when_source_content.hl_group =
-                    M._config.virtual_text_when_source_content.hl_group_default
-            end
-            if meta.virtual_text_when_source_content.delay_ms == nil then
-                meta.virtual_text_when_source_content.delay_ms = M._config.virtual_text_when_source_content.delay_ms
+                meta.virtual_text_when_source_content.hl_group = M._config.virtual_text_when_source_content.hl_group_default
             end
         end
     end
 
     add_keymap()
-
-    for meta_name, _ in pairs(M._config.metas) do
-        add_keymap(meta_name)
+    for meta_name_key, _ in pairs(M._config.metas) do
+        add_keymap(meta_name_key)
     end
 end
 
 api.nvim_create_user_command('REPLStart', M.commands.start, {
-    count = true,
-    bang = true,
-    nargs = '?',
-    complete = function()
-        local metas = {}
-        for name, _ in pairs(M._config.metas) do
-            table.insert(metas, name)
-        end
-        return metas
-    end,
-    desc = [[
-Create REPL `i` from the list of available REPLs.
-]],
+    count = true, bang = true, nargs = '?',
+    complete = function() local m = {}; for n, _ in pairs(M._config.metas) do table.insert(m, n) end return m end,
+    desc = "Create REPL `i` from the list of available REPLs.",
 })
-
-api.nvim_create_user_command(
-    'REPLCleanup',
-    M.commands.cleanup,
-    { desc = 'clean invalid repls, and rearrange the repls order.' }
-)
-
-api.nvim_create_user_command('REPLFocus', M.commands.focus, {
-    count = true,
-    nargs = '?',
-    desc = [[
-Focus on REPL `i` or the REPL that current buffer is attached to.
-]],
-})
-
-api.nvim_create_user_command('REPLHide', M.commands.hide, {
-    count = true,
-    nargs = '?',
-    desc = [[
-Hide REPL `i` or the REPL that current buffer is attached to.
-]],
-})
-
-api.nvim_create_user_command('REPLHideOrFocus', M.commands.hide_or_focus, {
-    count = true,
-    nargs = '?',
-    desc = [[
-Hide or focus REPL `i` or the REPL that current buffer is attached to.
-]],
-})
-
-api.nvim_create_user_command('REPLClose', M.commands.close, {
-    count = true,
-    nargs = '?',
-    desc = [[
-Close REPL `i` or the REPL that current buffer is attached to.
-]],
-})
-
-api.nvim_create_user_command('REPLSwap', M.commands.swap, {
-    desc = [[Swap two REPLs]],
-    nargs = '*',
-})
-
-api.nvim_create_user_command('REPLAttachBufferToREPL', M.commands.attach_buffer, {
-    count = true,
-    bang = true,
-    desc = [[
-Attach current buffer to REPL `i`
-]],
-})
-
-api.nvim_create_user_command('REPLDetachBufferToREPL', M.commands.detach_buffer, {
-    count = true,
-    desc = [[Detach current buffer to any REPL.]],
-})
-
-api.nvim_create_user_command('REPLSendVisual', M.commands.send_visual, {
-    count = true,
-    nargs = '?',
-    desc = [[
-Send visual range to REPL `i` or the REPL that current buffer is attached to.
-]],
-})
-
-api.nvim_create_user_command('REPLSendLine', M.commands.send_line, {
-    count = true,
-    nargs = '?',
-    desc = [[
-Send current line to REPL `i` or the REPL that current buffer is attached to.
-]],
-})
-
-api.nvim_create_user_command('REPLSendOperator', M.commands.send_operator, {
-    count = true,
-    nargs = '?',
-    desc = [[
-The operator of send text to REPL `i` or the REPL that current buffer is attached to.
-]],
-})
-
-api.nvim_create_user_command('REPLSourceVisual', M.commands.source_visual, {
-    count = true,
-    nargs = '?',
-    desc = [[
-Source visual range to REPL `i` or the REPL that current buffer is attached to.
-]],
-})
-
-api.nvim_create_user_command('REPLSourceOperator', M.commands.source_operator, {
-    count = true,
-    nargs = '?',
-    desc = [[
-Source visual range to REPL `i` or the REPL that current buffer is attached to.
-]],
-})
-
-api.nvim_create_user_command('REPLExec', M.commands.exec, {
-    count = true,
-    nargs = '*',
-    desc = [[
-Execute a command in REPL `i` or the REPL that current buffer is attached to.
-]],
-})
+api.nvim_create_user_command('REPLCleanup', M.commands.cleanup, { desc = 'Clean invalid repls, and rearrange the repls order.' })
+api.nvim_create_user_command('REPLFocus', M.commands.focus, { count = true, nargs = '?', desc = "Focus on REPL `i` or the REPL that current buffer is attached to." })
+api.nvim_create_user_command('REPLHide', M.commands.hide, { count = true, nargs = '?', desc = "Hide REPL `i` or the REPL that current buffer is attached to." })
+api.nvim_create_user_command('REPLHideOrFocus', M.commands.hide_or_focus, { count = true, nargs = '?', desc = "Hide or focus REPL `i` or the REPL that current buffer is attached to." })
+api.nvim_create_user_command('REPLClose', M.commands.close, { count = true, nargs = '?', desc = "Close REPL `i` or the REPL that current buffer is attached to." })
+api.nvim_create_user_command('REPLSwap', M.commands.swap, { desc = "Swap two REPLs", nargs = '*' })
+api.nvim_create_user_command('REPLAttachBufferToREPL', M.commands.attach_buffer, { count = true, bang = true, desc = "Attach current buffer to REPL `i`" })
+api.nvim_create_user_command('REPLDetachBufferToREPL', M.commands.detach_buffer, { count = true, desc = "Detach current buffer to any REPL." })
+api.nvim_create_user_command('REPLSendVisual', M.commands.send_visual, { count = true, nargs = '?', desc = "Send visual range to REPL `i` or the REPL that current buffer is attached to." })
+api.nvim_create_user_command('REPLSendLine', M.commands.send_line, { count = true, nargs = '?', desc = "Send current line to REPL `i` or the REPL that current buffer is attached to." })
+api.nvim_create_user_command('REPLSendOperator', M.commands.send_operator, { count = true, nargs = '?', desc = "The operator of send text to REPL `i` or the REPL that current buffer is attached to." })
+api.nvim_create_user_command('REPLSourceVisual', M.commands.source_visual, { count = true, nargs = '?', desc = "Source visual range to REPL `i` or the REPL that current buffer is attached to." })
+api.nvim_create_user_command('REPLSourceOperator', M.commands.source_operator, { count = true, nargs = '?', desc = "Source operator range to REPL `i` or the REPL that current buffer is attached to." })
+api.nvim_create_user_command('REPLExec', M.commands.exec, { count = true, nargs = '*', desc = "Execute a command in REPL `i` or the REPL that current buffer is attached to." })
 
 return M
+
