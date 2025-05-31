@@ -490,6 +490,33 @@ M.formatter.bracketed_pasting_no_final_new_line = M.formatter.factory {
     },
 }
 
+--- Displays the source comment as virtual text in the REPL buffer.
+---@param repl table The REPL object.
+---@param original_strings string[] The original strings/code block sent by the user.
+---@param command_to_match string The first line of the command sent to REPL, used for anchoring.
+local function _display_source_comment_virtual_text(repl, original_strings, command_to_match)
+    local meta = M._config.metas[repl.name]
+    if meta.virtual_text_when_source_content and meta.virtual_text_when_source_content.enabled then
+        local code_part_for_display = 'YAREPL'
+        if original_strings and #original_strings > 0 then
+            for _, line_str in ipairs(original_strings) do
+                local trimmed_line = vim.fn.trim(line_str)
+                if #trimmed_line > 0 then
+                    code_part_for_display = trimmed_line
+                    break
+                end
+            end
+        end
+        local comment_text_for_virt = string.format('%s - %s', os.date '%H:%M:%S', code_part_for_display)
+
+        repl.pending_virt_text_info = {
+            command_to_match = command_to_match,
+            comment_text = comment_text_for_virt,
+            hl_group = meta.virtual_text_when_source_content.hl_group,
+        }
+    end
+end
+
 M._send_strings = function(id, name, bufnr, strings, use_formatter, source_content)
     use_formatter = use_formatter == nil and true or use_formatter
     if bufnr == nil or bufnr == 0 then
@@ -526,27 +553,8 @@ M._send_strings = function(id, name, bufnr, strings, use_formatter, source_conte
         end
 
         if source_command_sent_to_repl and source_command_sent_to_repl ~= '' then
-            if meta.virtual_text_when_source_content and meta.virtual_text_when_source_content.enabled then
-                local command_to_match_in_repl = vim.split(source_command_sent_to_repl, '\n')[1]
-
-                local code_part_for_display = 'YAREPL'
-                if strings and #strings > 0 then
-                    for _, line_str in ipairs(strings) do
-                        local trimmed_line = vim.fn.trim(line_str)
-                        if #trimmed_line > 0 then
-                            code_part_for_display = trimmed_line
-                            break
-                        end
-                    end
-                end
-                local comment_text_for_virt = string.format('%s - %s', os.date '%H:%M:%S', code_part_for_display)
-
-                repl.pending_virt_text_info = {
-                    command_to_match = command_to_match_in_repl,
-                    comment_text = comment_text_for_virt,
-                    hl_group = meta.virtual_text_when_source_content.hl_group,
-                }
-            end
+            local command_to_match_in_repl = vim.split(source_command_sent_to_repl, '\n')[1]
+            _display_source_comment_virtual_text(repl, strings, command_to_match_in_repl)
             strings = vim.split(source_command_sent_to_repl, '\n')
         end
     end
