@@ -8,7 +8,7 @@ behavior for different REPL types.
 local M = {} -- Main module table that will be returned.
 local api = vim.api -- Neovim API Lua bindings.
 local fn = vim.fn -- Neovim built-in functions.
-local is_win32 = vim.fn.has 'win32' == 1 and true or false -- Boolean flag indicating if the current OS is Windows.
+local is_win32 = (vim.fn.has 'win32' == 1)
 
 --- @class YareplFormatter
 --- @field factory fun(opts: table):fun(lines: string[]):string[] A function to create custom formatters.
@@ -1537,10 +1537,6 @@ M.setup = function(opts)
                 meta.virtual_text_when_source_content.hl_group =
                     M._config.virtual_text_when_source_content.hl_group_default
             end
-            -- Note: `delay_ms` for virtual text seems to be referenced but not defined in default_config or used elsewhere.
-            -- if meta.virtual_text_when_source_content.delay_ms == nil then
-            -- meta.virtual_text_when_source_content.delay_ms = M._config.virtual_text_when_source_content.delay_ms
-            -- end
         end
     end
 
