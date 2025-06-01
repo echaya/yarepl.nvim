@@ -1428,7 +1428,7 @@ function M.make_tmp_file(content, keep_file)
     local f = io.open(tmp_file, 'w+') -- Open for writing (create if not exists, truncate).
     if f == nil then
         -- Error handling: could not open temp file.
-        M.notify('Cannot open temporary message file: ' .. tmp_file, 'error', vim.log.levels.ERROR)
+        vim.notify('Cannot open temporary message file: ' .. tmp_file, vim.log.levels.ERROR)
         return
     end
 
