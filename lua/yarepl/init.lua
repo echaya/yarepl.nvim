@@ -619,7 +619,7 @@ end
 -- @param opts.when_multi_lines? table Options for multi-line input.
 -- @param opts.when_multi_lines.open_code? string Code to prepend to the first line.
 -- @param opts.when_multi_lines.end_code? string Code to append after the last line (typically a newline/CR).
--- @param opts.when_multi_lines.trim_empty_lines? boolean If true, remove empty lines.
+-- @param opts.when_multi_lines.trim_empty_lines? boolean If true, remove empty lines from processing.
 -- @param opts.when_multi_lines.remove_leading_spaces? boolean If true, remove leading spaces from each line.
 -- @param opts.when_multi_lines.gsub_pattern? string Lua pattern for `string.gsub`.
 -- @param opts.when_multi_lines.gsub_repl? string Replacement string/function for `string.gsub`.
@@ -672,7 +672,7 @@ function M.formatter.factory(opts)
                 lines[1] = lines[1]:gsub('\t', string.rep(' ', config.number_of_spaces_to_replace_tab))
             end
 
-            if config.when_single_line.gsub_pattern ~= '' then
+            if config.when_single_line.gsub_pattern ~= '' and config.when_single_line.gsub_pattern then
                 lines[1] = lines[1]:gsub(config.when_single_line.gsub_pattern, config.when_single_line.gsub_repl)
             end
 
@@ -682,50 +682,72 @@ function M.formatter.factory(opts)
 
         -- Multi-line input processing.
         local formatted_lines = {}
-        local line = lines[1] -- First line.
+        local line -- reusable variable for the current line being processed
 
-        if config.when_multi_lines.gsub_pattern ~= '' then
+        -- Process the first line separately for prepending open_code
+        line = lines[1]
+        if config.when_multi_lines.gsub_pattern ~= '' and config.when_multi_lines.gsub_pattern then
             line = line:gsub(config.when_multi_lines.gsub_pattern, config.when_multi_lines.gsub_repl)
         end
         line = config.when_multi_lines.open_code .. line -- Prepend open_code.
         table.insert(formatted_lines, line)
 
-        -- Process intermediate lines.
+        -- Process intermediate lines (from the second line onwards).
         for i = 2, #lines do
             line = lines[i]
 
-            if config.when_multi_lines.trim_empty_lines and line == '' then
-                goto continue -- Skip empty lines if configured.
+            -- Conditionally process and add the line if it's not an empty line meant to be trimmed.
+            if not (config.when_multi_lines.trim_empty_lines and line == '') then
+                if config.when_multi_lines.remove_leading_spaces then
+                    line = line:gsub('^%s+', '') -- Remove leading whitespace.
+                end
+
+                if config.replace_tab_by_space then
+                    line = line:gsub('\t', string.rep(' ', config.number_of_spaces_to_replace_tab))
+                end
+
+                if config.when_multi_lines.gsub_pattern ~= '' and config.when_multi_lines.gsub_pattern then
+                    line = line:gsub(config.when_multi_lines.gsub_pattern, config.when_multi_lines.gsub_repl)
+                end
+
+                table.insert(formatted_lines, line)
             end
-
-            if config.when_multi_lines.remove_leading_spaces then
-                line = line:gsub('^%s+', '') -- Remove leading whitespace.
-            end
-
-            if config.replace_tab_by_space then
-                line = line:gsub('\t', string.rep(' ', config.number_of_spaces_to_replace_tab))
-            end
-
-            if config.when_multi_lines.gsub_pattern ~= '' then
-                line = line:gsub(config.when_multi_lines.gsub_pattern, config.when_multi_lines.gsub_repl)
-            end
-
-            table.insert(formatted_lines, line)
-
-            ::continue:: -- Lua goto label.
+            -- The ::continue:: label and goto are removed.
         end
 
         -- Append end_code if it's defined for multi-lines.
+        -- This is done after processing all lines.
         if config.when_multi_lines.end_code then
+            -- Check if the last actual content line should have the end_code,
+            -- or if end_code is a standalone line.
+            -- The original logic inserted it as a new line if #formatted_lines was > 0 (implicit from loop structure)
+            -- or after the first line if only one line was processed (but this is multi-line path).
+            -- For simplicity and consistency with many bracketed paste modes,
+            -- let's assume end_code is meant to be appended effectively as a final part/line.
+            -- If it was meant to be appended to the *last non-empty line*, the logic would be more complex.
+            -- Given common use cases like bracketed paste, adding it as a final element (which might be a separate "line" to send) is typical.
             table.insert(formatted_lines, config.when_multi_lines.end_code)
         end
 
         -- On Windows, join lines with `\r` instead of `\n` (which `chansend` uses by default for tables)
         -- to prevent extra blank lines in some REPLs.
         if is_win32 and config.os.windows.join_lines_with_cr then
-            formatted_lines = { table.concat(formatted_lines, '\r') }
+            -- This check should only apply if there are lines to join.
+            if #formatted_lines > 0 then
+                formatted_lines = { table.concat(formatted_lines, '\r') }
+            else
+                -- If formatted_lines is empty (e.g., all input lines were trimmed empty lines and no open/end code),
+                -- then ensure it remains an empty table or handle as appropriate.
+                -- For `chansend`, an empty table results in nothing sent.
+                -- If `open_code` and `end_code` were the only things, this might need adjustment.
+                -- However, `open_code` is added to the first line, and `end_code` is added at the end.
+                -- If all lines were empty and trimmed, only `open_code` (on a non-existent line effectively) and `end_code` would remain.
+                -- The current structure adds open_code to line[1] and end_code as a separate entry.
+                -- If line[1] was empty and trimmed (not possible as trim_empty_lines applies from line 2),
+                -- or if input lines array was empty, this could be an edge case.
+                -- Assuming `lines` always has at least one element for this path.
+            end
         end
-
         return formatted_lines
     end
 end
