@@ -207,8 +207,6 @@ local function focus_repl(repl)
     end
 end
 
--- Helper functions for create_repl
-
 --- Sets up the REPL buffer, filetype, and window.
 -- @param repl_name string The name/type of the REPL (e.g., "python").
 -- @return number|nil The buffer number of the created REPL buffer, or nil on failure.
@@ -478,63 +476,97 @@ M.bufnr_is_attached_to_repl = function(bufnr)
     end
 end
 
+--- Gets an initial REPL candidate based on the provided ID or buffer attachment.
+-- Also determines the 'effective_id' which might be the provided ID or a default (e.g., 1).
+-- @param id_param number|nil The ID parameter passed to M._get_repl (can be nil or 0).
+-- @param bufnr number|nil The buffer number from which the request originated.
+-- @return table|nil initial_repl_candidate: The initially selected REPL object, or nil.
+-- @return number effective_id: The ID that was effectively used or determined.
+local function _get_initial_repl_candidate(id_param, bufnr)
+    local initial_repl_candidate
+    local effective_id
+
+    if id_param ~= nil and id_param ~= 0 then
+        -- A specific REPL ID is provided.
+        effective_id = id_param
+        initial_repl_candidate = M._repls[effective_id]
+    else
+        -- No specific ID (id_param is nil or 0), try to use attached REPL or default to REPL #1.
+        effective_id = 1 -- Default ID for searching if no specific one given or for fallback.
+        initial_repl_candidate = M._bufnrs_to_repls[bufnr]
+
+        if not repl_is_valid(initial_repl_candidate) then
+            -- Attached REPL is not valid (or no REPL attached), fall back to REPL #1.
+            initial_repl_candidate = M._repls[effective_id] -- Uses effective_id = 1 here.
+        end
+    end
+    return initial_repl_candidate, effective_id
+end
+
+--- Refines the REPL selection if a target name is provided.
+-- It uses the initial candidate and its effective ID to find the closest REPL matching the name.
+-- @param initial_candidate table|nil The REPL object selected by _get_initial_repl_candidate.
+-- @param base_id_for_search number The ID to use as a reference point for the name search.
+-- @param target_name string The name of the REPL type to find (e.g., "python").
+-- @param bufnr_of_origin number|nil The buffer from which the request originated, used to check if
+--                                  initial_candidate was an attached REPL.
+-- @return table|nil The refined REPL object if a name match is found, otherwise nil.
+local function _refine_repl_by_name_if_given(initial_candidate, base_id_for_search, target_name, bufnr_of_origin)
+    if target_name == nil or target_name == '' then
+        -- No name provided for refinement, return the initial candidate.
+        return initial_candidate
+    end
+
+    local search_reference_id = base_id_for_search
+
+    -- If the initial_candidate was specifically the one attached to bufnr_of_origin,
+    -- then the search for the 'closest' named REPL should be relative to
+    -- this initial_candidate's actual position in the M._repls list.
+    if repl_is_valid(initial_candidate) and M._bufnrs_to_repls[bufnr_of_origin] == initial_candidate then
+        for idx, r_obj in ipairs(M._repls) do
+            if r_obj == initial_candidate then
+                search_reference_id = idx -- Use the actual index in M._repls as the reference.
+                break
+            end
+        end
+    end
+
+    local found_idx_by_name = find_closest_repl_from_id_with_name(search_reference_id, target_name)
+
+    if found_idx_by_name then
+        return M._repls[found_idx_by_name]
+    else
+        -- No REPL found matching the name criteria.
+        return nil
+    end
+end
+
 --- Retrieves a REPL instance based on ID, name, and current buffer.
--- This function has complex logic to determine the target REPL:
--- 1. If `id` is nil or 0:
---    a. Try to get the REPL attached to the `bufnr`.
---    b. If not attached, or attached REPL is invalid, default to `id = 1` and get `M._repls[1]`.
--- 2. If `id` is provided (and not 0):
---    a. Get `M._repls[id]`.
--- 3. If `name` is provided (and not empty):
---    a. Search for the closest REPL with that `name` relative to the `id` determined above.
---       The "base ID for search" is adjusted if the initially found REPL was from `_bufnrs_to_repls`.
+-- This function determines the target REPL by:
+-- 1. Getting an initial candidate based on ID or buffer attachment.
+-- 2. If a name is provided, refining the selection to the closest REPL of that name.
+-- 3. Validating the final candidate.
+-- (This function replaces the previous M._get_repl implementation.)
 -- @param id number|nil The ID of the REPL. If 0 or nil, infers from context.
 -- @param name string|nil The name of the REPL type. If provided, searches for the closest match.
 -- @param bufnr number|nil The buffer number, used for finding attached REPLs.
--- @return YareplInstance|nil The resolved REPL object, or nil if not found or invalid.
+-- @return table|nil The resolved REPL object, or nil if not found or invalid.
 function M._get_repl(id, name, bufnr)
-    local repl
-    if id == nil or id == 0 then
-        -- No ID or ID 0: try attached REPL for the buffer, or default to REPL #1.
-        repl = M._bufnrs_to_repls[bufnr]
-        id = 1 -- Default ID if no specific one is requested or found via attachment.
-        if not repl_is_valid(repl) then
-            repl = M._repls[id]
-        end
-    else
-        -- Specific ID provided.
-        repl = M._repls[id]
+    -- Step 1: Get an initial REPL candidate and the ID that was effectively used/determined.
+    local repl_candidate, effective_id = _get_initial_repl_candidate(id, bufnr)
+
+    -- Step 2: If a 'name' is provided, try to refine the selection based on that name.
+    -- The 'repl_candidate' from step 1 is passed along, as its origin (attached vs. by ID)
+    -- influences how 'base_id_for_search' is truly determined for name searching.
+    repl_candidate = _refine_repl_by_name_if_given(repl_candidate, effective_id, name, bufnr)
+
+    -- Step 3: Validate the final REPL candidate.
+    if not repl_is_valid(repl_candidate) then
+        return nil
     end
 
-    if name ~= nil and name ~= '' then
-        -- A REPL name is specified; find the closest one of this type.
-        local base_id_for_search = id
-        -- If the current `repl` was the one attached to `bufnr`,
-        -- find its actual index in `M._repls` to use as the search base.
-        if M._bufnrs_to_repls[bufnr] == repl then
-            for idx, r_obj in ipairs(M._repls) do
-                if r_obj == repl then
-                    base_id_for_search = idx
-                    break
-                end
-            end
-        end
-
-        local found_idx_by_name = find_closest_repl_from_id_with_name(base_id_for_search, name)
-        if found_idx_by_name then
-            repl = M._repls[found_idx_by_name]
-        else
-            repl = nil -- No REPL of the given name found.
-        end
-    end
-
-    if not repl_is_valid(repl) then
-        return nil -- Return nil if the ultimately selected REPL is invalid.
-    end
-
-    return repl
+    return repl_candidate
 end
-
 --- Scrolls the window of a given REPL to the bottom.
 -- This is typically called after sending input to the REPL.
 -- @param repl YareplInstance The REPL instance whose window should be scrolled.
