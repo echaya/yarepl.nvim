@@ -557,7 +557,9 @@ end
 ---@param use_formatter boolean? Whether to apply the configured formatter. Defaults to true.
 ---@param source_content boolean? Whether to treat content as needing sourcing (e.g., wrapping in `source file` command). Defaults to false.
 M._send_strings = function(id, name, bufnr, strings, use_formatter, source_content)
-    use_formatter = use_formatter == nil and true or use_formatter -- Default use_formatter to true.
+    if use_formatter == nil then
+        use_formatter = true
+    end
     if bufnr == nil or bufnr == 0 then
         bufnr = api.nvim_get_current_buf() -- Default to current buffer if not specified.
     end
