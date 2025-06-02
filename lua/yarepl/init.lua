@@ -383,29 +383,29 @@ function M.formatter.factory(opts)
         error 'opts must be a table'
     end
 
-    -- Default configuration for a formatter.
+    -- Default configuration for the formatter
     local config = {
-        replace_tab_by_space = false, -- Whether to replace tabs with spaces.
-        number_of_spaces_to_replace_tab = 8, -- Number of spaces per tab if replacing.
-        when_multi_lines = { -- Settings applied when formatting multiple lines.
-            open_code = '', -- String to prepend to the first line.
-            end_code = '\r', -- String to append after the last line (typically a carriage return).
-            trim_empty_lines = false, -- Whether to remove empty lines.
-            remove_leading_spaces = false, -- Whether to remove leading spaces from each line.
-            -- Lua pattern for string.gsub to apply to each line.
-            gsub_pattern = '',
+        replace_tab_by_space = false,
+        number_of_spaces_to_replace_tab = 8,
+        when_multi_lines = {
+            open_code = '',
+            end_code = '\r', -- Default to carriage return for multi-line end
+            trim_empty_lines = false,
+            remove_leading_spaces = false,
+            -- gsub_pattern and gsub_repl are applied to each line after other processing
+            -- but before open_code (for the first line) and end_code.
+            gsub_pattern = '', -- Lua pattern
             gsub_repl = '',
         },
-        when_single_line = { -- Settings applied when formatting a single line.
-            open_code = '', -- String to prepend to the line.
-            end_code = '\r', -- String to append to the line.
-            gsub_pattern = '',
+        when_single_line = {
+            open_code = '',
+            end_code = '\r', -- Default to carriage return for single-line end
+            gsub_pattern = '', -- Lua pattern
             gsub_repl = '',
         },
-        os = { -- OS-specific formatter behavior.
+        os = {
             windows = {
-                -- If true, join lines with '\r' instead of '\n' for `chansend` on Windows.
-                join_lines_with_cr = true,
+                join_lines_with_cr = true, -- Specific behavior for Windows
             },
         },
     }
@@ -413,55 +413,57 @@ function M.formatter.factory(opts)
     -- Merge user-provided options with defaults.
     config = vim.tbl_deep_extend('force', config, opts)
 
-    -- The returned formatter function.
+    -- Return the actual formatting function that captures the resolved 'config'
     return function(lines)
-        if #lines == 1 then -- Single-line processing.
-            if config.replace_tab_by_space then
-                lines[1] = lines[1]:gsub('\t', string.rep(' ', config.number_of_spaces_to_replace_tab))
-            end
-
-            if config.when_single_line.gsub_pattern ~= '' then
-                lines[1] = lines[1]:gsub(config.when_single_line.gsub_pattern, config.when_single_line.gsub_repl)
-            end
-
-            lines[1] = config.when_single_line.open_code .. lines[1] .. config.when_single_line.end_code
-            return lines
-        end
-
-        -- Multi-line processing.
-        local formatted_lines = {}
-        local line = lines[1] -- Process the first line.
-
-        if config.when_multi_lines.gsub_pattern ~= '' then
-            line = line:gsub(config.when_multi_lines.gsub_pattern, config.when_multi_lines.gsub_repl)
-        end
-        line = config.when_multi_lines.open_code .. line -- Prepend open_code.
-
-        table.insert(formatted_lines, line)
-
-        -- Process subsequent lines.
-        for i = 2, #lines do
-            line = lines[i]
-
-            if config.when_multi_lines.trim_empty_lines and line == '' then
-                goto continue -- Skip empty lines if configured.
-            end
-
-            if config.when_multi_lines.remove_leading_spaces then
-                line = line:gsub('^%s+', '') -- Remove leading whitespace.
-            end
-
+        if #lines == 1 then
+            local line = lines[1] -- Work on a copy if modifications are extensive, but direct assignment is fine here.
             if config.replace_tab_by_space then
                 line = line:gsub('\t', string.rep(' ', config.number_of_spaces_to_replace_tab))
             end
 
-            if config.when_multi_lines.gsub_pattern ~= '' then
-                line = line:gsub(config.when_multi_lines.gsub_pattern, config.when_multi_lines.gsub_repl)
+            -- Apply gsub only if a pattern is provided
+            if config.when_single_line.gsub_pattern ~= '' then
+                line = line:gsub(config.when_single_line.gsub_pattern, config.when_single_line.gsub_repl)
             end
 
-            table.insert(formatted_lines, line)
+            -- Add open and end codes for the single line
+            line = config.when_single_line.open_code .. line .. config.when_single_line.end_code
+            return { line } -- Return as a table of lines
+        end
 
-            ::continue::
+        -- Multi-line processing
+        local formatted_lines = {}
+        local current_line = lines[1] -- Process the first line separately for open_code
+
+        -- Apply multi-line gsub to the first line if a pattern is provided
+        if config.when_multi_lines.gsub_pattern ~= '' then
+            current_line = current_line:gsub(config.when_multi_lines.gsub_pattern, config.when_multi_lines.gsub_repl)
+        end
+        current_line = config.when_multi_lines.open_code .. current_line
+        table.insert(formatted_lines, current_line)
+
+        -- Process subsequent lines
+        for i = 2, #lines do
+            current_line = lines[i]
+
+            -- Only process and add the line if it's not an empty line that's configured to be trimmed
+            if not (config.when_multi_lines.trim_empty_lines and current_line == '') then
+                if config.when_multi_lines.remove_leading_spaces then
+                    current_line = current_line:gsub('^%s+', '')
+                end
+
+                if config.replace_tab_by_space then
+                    current_line = current_line:gsub('\t', string.rep(' ', config.number_of_spaces_to_replace_tab))
+                end
+
+                -- Apply multi-line gsub if a pattern is provided
+                if config.when_multi_lines.gsub_pattern ~= '' then
+                    current_line =
+                        current_line:gsub(config.when_multi_lines.gsub_pattern, config.when_multi_lines.gsub_repl)
+                end
+
+                table.insert(formatted_lines, current_line)
+            end
         end
 
         if config.when_multi_lines.end_code then
