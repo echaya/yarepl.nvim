@@ -523,8 +523,10 @@ local function append_source_log(initial_source_command, strings, source_syntax_
         if comment_prefix then
             local first_non_empty_line = 'YAREPL' -- Default text in case no non-empty line is found.
             -- Determine the final prefix, ensuring a space if the prefix isn't empty and doesn't end with one.
-            local final_prefix = (comment_prefix:sub(-1) ~= ' ' and #comment_prefix > 0) and (comment_prefix .. ' ')
-                or comment_prefix
+            local final_prefix = comment_prefix
+            if #comment_prefix > 0 and comment_prefix:sub(-1) ~= ' ' then
+                final_prefix = comment_prefix .. ' '
+            end
             -- Find the first non-empty line from the original code lines.
             for _, line in ipairs(strings) do
                 local trimmed_line = vim.fn.trim(line) -- Trim whitespace from the line.
