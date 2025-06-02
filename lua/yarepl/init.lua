@@ -286,11 +286,7 @@ end
 -- @param bufnr number The buffer number to check.
 -- @return boolean True if the buffer is attached to a valid REPL, false otherwise.
 M.bufnr_is_attached_to_repl = function(bufnr)
-    if not repl_is_valid(M._bufnrs_to_repls[bufnr]) then
-        return false
-    else
-        return true
-    end
+    return repl_is_valid(M._bufnrs_to_repls[bufnr])
 end
 
 --- Gets a specific REPL instance based on ID, name, and/or attached buffer.
