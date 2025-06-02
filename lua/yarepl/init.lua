@@ -8,7 +8,7 @@ supporting different REPL types, custom commands, and formatters.
 local M = {}
 local api = vim.api
 local fn = vim.fn
-local is_win32 = vim.fn.has 'win32' == 1 and true or false -- True if the operating system is Windows, false otherwise.
+local is_win32 = vim.fn.has 'win32' == 1
 
 -- Table to store available formatter functions.
 M.formatter = {}
