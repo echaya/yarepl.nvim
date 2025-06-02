@@ -1145,27 +1145,22 @@ end
 ---@param content string The content to write to the temporary file.
 ---@param keep_file boolean? If true, the temporary file will not be automatically deleted.
 ---@return string? The file name (path) of the temporary file, or nil on failure.
-function M.make_tmp_file(content, keep_file)
-    local tmp_file = os.tmpname() .. '_yarepl' -- Generate a temporary file name.
-
-    local f = io.open(tmp_file, 'w+') -- Open in write+read mode, create if not exists.
+function M.make_tmp_file(content, keep_file) -- Added keep_file parameter
+    local tmp_file = os.tmpname() .. '_yarepl'
+    local f = io.open(tmp_file, 'w+')
     if f == nil then
-        -- Using M.notify which might not be defined at this point if this is a general utility.
-        -- Consider using vim.notify if this function is meant to be more standalone.
         vim.notify('Cannot open temporary message file: ' .. tmp_file, vim.log.levels.ERROR)
-        return
+        return nil -- Return nil on failure
     end
 
     f:write(content)
     f:close()
 
     if not keep_file then
-        -- Schedule deletion of the temp file after 5 seconds.
         vim.defer_fn(function()
             os.remove(tmp_file)
         end, 5000)
     end
-
     return tmp_file
 end
 
@@ -1177,29 +1172,13 @@ end
 ---@param keep_file boolean? If true, the temporary file will not be automatically deleted.
 ---@return string? The command string to source the file, or nil on failure to create the file.
 function M.source_file_with_source_syntax(content, source_syntax, keep_file)
-    -- Create a temporary file. Note: os.tmpname() just gives a name, doesn't create.
-    -- Let's reuse M.make_tmp_file for consistency and proper error handling if it were more robust.
-    -- However, the current code duplicates the logic.
-    local tmp_file = os.tmpname() .. '_yarepl'
-
-    local f = io.open(tmp_file, 'w+')
-    if f == nil then
-        vim.notify('Cannot open temporary message file: ' .. tmp_file, vim.log.levels.ERROR)
-        return
+    local tmp_file = M.make_tmp_file(content, keep_file) -- Call the modified function
+    if not tmp_file then
+        return nil
     end
 
-    f:write(content)
-    f:close()
-
-    if not keep_file then
-        vim.defer_fn(function()
-            os.remove(tmp_file)
-        end, 5000)
-    end
-
-    -- Replace the {{file}} placeholder in the source_syntax string with the actual temp file path.
+    -- replace {{file}} placeholder with the temp file name
     source_syntax = source_syntax:gsub('{{file}}', tmp_file)
-
     return source_syntax
 end
 
